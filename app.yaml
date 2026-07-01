@@ -1,25 +1,65 @@
 name: gotchaped
 region: nyc
-services:
-  - name: web
-    git:
-      repo_clone_url: https://github.com/iklobato/brand-check.git
-      branch: master
-    dockerfile_path: Dockerfile
-    http_port: 8080
-    instance_size_slug: professional-xs
-    instance_count: 1
-    health_check:
-      http_path: /
-      port: 8080
-    envs:
-      - key: HOST
-        value: "0.0.0.0"
-      - key: DATABASE_URL
-        scope: RUN_TIME
-        value: ${inpi-pg.DATABASE_URL}
 databases:
   - name: inpi-pg
     engine: PG
     cluster_name: inpi-pg
     production: true
+  - name: financialdata-valkey
+    engine: VALKEY
+    cluster_name: financialdata-valkey
+    production: true
+ingress:
+  rules:
+    - component:
+        name: web
+      match:
+        path:
+          prefix: /
+services:
+  - name: web
+    dockerfile_path: Dockerfile
+    git:
+      branch: master
+      repo_clone_url: https://github.com/iklobato/brand-check.git
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: professional-xs
+    health_check:
+      http_path: /
+      port: 8080
+    envs:
+      - key: HOST
+        scope: RUN_AND_BUILD_TIME
+        value: "0.0.0.0"
+      - key: DATABASE_URL
+        scope: RUN_TIME
+        value: ${inpi-pg.DATABASE_URL}
+      - key: CELERY_BROKER_URL
+        scope: RUN_TIME
+        value: ${financialdata-valkey.DATABASE_URL}
+      - key: CELERY_RESULT_BACKEND
+        scope: RUN_TIME
+        value: ${financialdata-valkey.DATABASE_URL}
+      - key: VALKEY_URL
+        scope: RUN_TIME
+        value: ${financialdata-valkey.DATABASE_URL}
+workers:
+  - name: celery-worker
+    dockerfile_path: Dockerfile
+    git:
+      branch: master
+      repo_clone_url: https://github.com/iklobato/brand-check.git
+    run_command: celery -A app worker --pool=threads --concurrency=32 -Q checks,celery --loglevel=info
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    envs:
+      - key: CELERY_BROKER_URL
+        scope: RUN_TIME
+        value: ${financialdata-valkey.DATABASE_URL}
+      - key: CELERY_RESULT_BACKEND
+        scope: RUN_TIME
+        value: ${financialdata-valkey.DATABASE_URL}
+      - key: VALKEY_URL
+        scope: RUN_TIME
+        value: ${financialdata-valkey.DATABASE_URL}

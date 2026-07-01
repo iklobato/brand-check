@@ -24,13 +24,18 @@ import re
 import socket
 import sqlite3
 import threading
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import redis
+from celery import Celery, group
 
 csv.field_size_limit(1 << 24)
 
@@ -38,6 +43,30 @@ HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8000"))
 DB_PATH = os.environ.get("INPI_DB", "inpi.db")
 DATA_DIR = os.environ.get("INPI_DIR", "inpi_csv")
+
+# --------------------------------------------------------------------------- #
+# Celery + Valkey: background checks run on the celery-worker component of the
+# same App Platform app; live job progress flows over Valkey pub/sub -> /ws/jobs.
+# --------------------------------------------------------------------------- #
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "")
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+VALKEY_URL = os.environ.get("VALKEY_URL", CELERY_BROKER_URL)  # pub/sub + job counters
+JOB_CHANNEL = "jobs"
+JOB_TTL = 3600
+
+celery = Celery(
+    "brandcheck",
+    broker=CELERY_BROKER_URL or None,
+    backend=CELERY_RESULT_BACKEND or None,
+)
+celery.conf.update(
+    task_acks_late=True,
+    worker_prefetch_multiplier=1,  # fair dispatch: slow HTTP tasks don't head-of-line block
+    broker_connection_retry_on_startup=True,
+    result_expires=JOB_TTL,
+)
+
+_rds = redis.from_url(VALKEY_URL, decode_responses=True) if VALKEY_URL else None
 
 BASE_URL = "https://dadosabertos.inpi.gov.br/download/marcas/"
 CORE_FILES = ("MARCAS_DADOS_BIBLIOGRAFICOS.csv", "MARCAS_CLASSIFICACOES_NICE.csv")
@@ -1046,6 +1075,112 @@ def social_check(username: str) -> list[dict]:
     return rows
 
 
+# --------------------------------------------------------------------------- #
+# Celery tasks: each wraps a pure check and publishes its result + live progress
+# to Valkey (pub/sub for the browser, a shared counter for cross-worker done/total).
+# --------------------------------------------------------------------------- #
+def _publish(job_id: str, kind: str, name: str, total: int, unit: str, result) -> None:
+    if not _rds:
+        return
+    done = _rds.incr(f"job:{job_id}:done")
+    _rds.expire(f"job:{job_id}:done", JOB_TTL)
+    _rds.publish(
+        JOB_CHANNEL,
+        json.dumps(
+            {
+                "job": job_id,
+                "kind": kind,
+                "name": name,
+                "unit": unit,
+                "done": done,
+                "total": total,
+                "result": result,
+                "ts": time.time(),
+            }
+        ),
+    )
+    if (
+        done >= total
+    ):  # closed job -> keep a resultless summary so a reloading sidebar backfills
+        _rds.zadd(
+            "jobs:recent",
+            {
+                json.dumps(
+                    {
+                        "job": job_id,
+                        "kind": kind,
+                        "name": name,
+                        "done": done,
+                        "total": total,
+                        "result": None,
+                        "ts": time.time(),
+                    }
+                ): time.time()
+            },
+        )
+        _rds.zremrangebyrank("jobs:recent", 0, -51)
+
+
+@celery.task(name="domain_task", soft_time_limit=15)
+def domain_task(name, tld, job_id, total):
+    r = _domain_info(name, tld)
+    _publish(job_id, "domains", name, total, tld, r)
+    return r
+
+
+@celery.task(name="social_task", soft_time_limit=15)
+def social_task(username, site, job_id, total):
+    r = _social_probe(username, site)
+    r["verdict"], r["level"] = _SOCIAL_VERDICT[r["exists"]]
+    _publish(job_id, "social", username, total, site["name"], r)
+    return r
+
+
+@celery.task(name="site_task", soft_time_limit=20)
+def site_task(domain, job_id, total):
+    r = site_check(domain)
+    _publish(job_id, "sites", domain, total, domain, r)
+    return r
+
+
+def _new_job(prefix: str) -> str:
+    jid = f"{prefix}:{uuid.uuid4().hex[:12]}"
+    if _rds:
+        _rds.set(f"job:{jid}:done", 0, ex=JOB_TTL)
+    return jid
+
+
+def enqueue_domains(name: str) -> str | None:
+    if not _rds:
+        return None
+    jid = _new_job("dom")
+    group(domain_task.s(name, t, jid, len(TLDS)) for t in TLDS).apply_async(
+        queue="checks"
+    )
+    return jid
+
+
+def enqueue_social(username: str) -> str | None:
+    if not _rds or not username:
+        return None
+    jid = _new_job("soc")
+    group(
+        social_task.s(username, s, jid, len(SOCIAL_SITES)) for s in SOCIAL_SITES
+    ).apply_async(queue="checks")
+    return jid
+
+
+def enqueue_sites(domains) -> str | None:
+    domains = list(domains)[:80]
+    if not _rds or not domains:
+        return None
+    jid = _new_job("site")
+    group(site_task.s(d, jid, len(domains)) for d in domains).apply_async(
+        queue="checks"
+    )
+    return jid
+
+
 def cnpj_detail(cnpj: str) -> dict:
     """Company registry lookup (BrasilAPI). Only CNPJ (14 digits); CPF is private."""
     digits = re.sub(r"\D", "", cnpj or "")
@@ -1258,6 +1393,18 @@ PAGE = """<!doctype html><html lang="en" data-theme="dark"><head>
 <script src="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
 <style>
  main{max-width:1180px}
+ #jobsbar{position:fixed;top:0;right:0;width:230px;height:100vh;overflow:auto;z-index:50;
+   background:var(--pico-card-background-color);border-left:1px solid var(--pico-muted-border-color);
+   font-size:.76rem;padding-bottom:1rem}
+ #jobsbar:empty{display:none}
+ .jb-h{position:sticky;top:0;background:var(--pico-card-sectioning-background-color);
+   padding:.4rem .5rem;font-weight:600;border-bottom:1px solid var(--pico-muted-border-color)}
+ .jb-row{padding:.3rem .5rem;border-bottom:1px solid var(--pico-muted-border-color)}
+ .jb-t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .jb-bar{height:5px;background:var(--pico-muted-border-color);border-radius:3px;margin-top:.25rem;overflow:hidden}
+ .jb-fill{height:100%;background:#e67e22;transition:width .2s}
+ .jb-fill.done{background:#27ae60}
+ @media(max-width:1100px){#jobsbar{display:none}}
  #q{font-size:1rem}
  .badge{color:#fff;padding:.08rem .42rem;border-radius:5px;font-size:.72rem;font-weight:600;white-space:nowrap}
  .muted{color:var(--pico-muted-color)}
@@ -1342,6 +1489,7 @@ PAGE = """<!doctype html><html lang="en" data-theme="dark"><head>
 <p>Type one brand name. You get domain availability and every matching INPI trademark (all sources, all classes) right here. First-pass only, not legal clearance.</p></hgroup>
 <div id="app"><article aria-busy="true">Loading...</article></div>
 </main>
+<aside id="jobsbar"></aside>
 <dialog id="modal"><article>
   <header><button aria-label="Close" rel="prev" id="modalClose"></button><span id="modalTitle"></span></header>
   <div id="modalBody"></div>
@@ -1402,6 +1550,10 @@ function showSearch(){
 const SITE={};
 let OUT_MARKS=[],CMP=[];
 async function onSearch(e){e.preventDefault();runSearch(document.getElementById('q').value.trim());}
+const CUR={name:'',dom:null,social:null,site:null};
+let DOM_ITEMS=[],SOCIAL_ITEMS=[],DOM_TOTAL=0;
+const JOBS={};
+const SOC_RANK={available:0,unknown:1,taken:2};
 async function runSearch(name){
   const out=document.getElementById('out');
   if(!name){out.innerHTML='';return;}
@@ -1409,58 +1561,69 @@ async function runSearch(name){
   out.innerHTML='<article aria-busy="true">Searching '+esc(name)+'...</article>';
   const d=await (await fetch('/api/search?name='+encodeURIComponent(name))).json();
   OUT_MARKS=d.marks;
+  CUR.name=name; CUR.dom=d.domJob; CUR.social=d.socialJob; CUR.site=null;
+  DOM_ITEMS=[]; SOCIAL_ITEMS=[]; DOM_TOTAL=0;
   out.innerHTML=render(d);
   saveHistory(d);renderHistory();
-  streamDomains(d.name);   // domains fill in real time (32-worker pool, streamed)
-  loadSocial(d.name);      // background maigret-style handle availability
+  // domains + social now run on the Celery workers; results arrive over the /ws/jobs feed
+  if(!d.domJob){const sum=document.getElementById('domsum');if(sum)sum.innerHTML='<span class="muted">workers offline</span>';}
 }
-// open a WebSocket to /ws/domains and call onRow(row) for each verdict as it streams in
-function readDomainStream(name,onRow){
-  return new Promise(resolve=>{
-    const proto=location.protocol==='https:'?'wss:':'ws:';
-    let ws;
-    try{ ws=new WebSocket(proto+'//'+location.host+'/ws/domains?name='+encodeURIComponent(name)); }
-    catch(e){ resolve(); return; }
-    ws.onmessage=ev=>{ try{onRow(JSON.parse(ev.data));}catch(e){} };
-    ws.onclose=()=>resolve();
-    ws.onerror=()=>{ try{ws.close();}catch(e){} resolve(); };
-  });
+// one WebSocket for ALL jobs from ALL workers: drives the sidebar + grid + social + dots
+let JOBWS=null;
+function openJobs(){
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  try{ JOBWS=new WebSocket(proto+'//'+location.host+'/ws/jobs'); }catch(e){ return; }
+  JOBWS.onmessage=ev=>{ let m; try{m=JSON.parse(ev.data);}catch(e){return;} onJob(m); };
+  JOBWS.onclose=()=>setTimeout(openJobs,2500);   // auto-reconnect
+  JOBWS.onerror=()=>{ try{JOBWS.close();}catch(e){} };
 }
-async function streamDomains(name){
+function onJob(m){
+  if(!m||!m.job)return;
+  JOBS[m.job]={kind:m.kind,name:m.name,done:m.done,total:m.total,ts:m.ts||Date.now()/1000};
+  renderSidebar();
+  if(m.result==null)return;   // backfill/summary rows carry no result
+  if(m.kind==='domains'&&m.job===CUR.dom){ DOM_TOTAL=m.total; DOM_ITEMS.push(m.result); renderDomains();
+    if(DOM_ITEMS.length>=m.total)startSiteChecks(); }
+  else if(m.kind==='social'&&m.job===CUR.social){ SOCIAL_ITEMS.push(m.result); renderSocial(); }
+  else if(m.kind==='sites'&&m.job===CUR.site&&m.result){ paintDot(m.result.domain,m.result); }
+}
+function renderDomains(){
   const grid=document.getElementById('domcards'), sum=document.getElementById('domsum');
   if(!grid)return;
-  const items=[];
-  await readDomainStream(name,x=>{
-    items.push(x);
-    items.sort((a,b)=>DOM_RANK[a.verdict]-DOM_RANK[b.verdict]);
-    grid.innerHTML=items.map(domCard).join('');           // re-render sorted as each arrives
-    if(sum)sum.innerHTML=domSummaryHtml(domCounts(items));
-  });
-  // once all in: live-site dots for registered domains + fill the history entry's domain counts
-  runSiteChecks(items.filter(x=>x.verdict==='taken'||x.verdict==='expiring').map(x=>x.domain));
-  const h=loadHistory(); if(h[0]&&h[0].name===name){h[0].dom=domCounts(items);
-    try{localStorage.setItem('bah_history',JSON.stringify(h));}catch(e){} renderHistory();}
+  const items=[...DOM_ITEMS].sort((a,b)=>DOM_RANK[a.verdict]-DOM_RANK[b.verdict]);
+  grid.innerHTML=items.map(domCard).join('');
+  if(sum)sum.innerHTML=domSummaryHtml(domCounts(items))+(DOM_ITEMS.length<DOM_TOTAL?' <span aria-busy="true"></span>':'');
+  const h=loadHistory(); if(h[0]&&h[0].name===CUR.name){h[0].dom=domCounts(items);try{localStorage.setItem('bah_history',JSON.stringify(h));}catch(e){}}
 }
-// collect the full domain list (used by compare, which is not real-time)
-async function fetchDomains(name){const items=[];await readDomainStream(name,x=>items.push(x));return items;}
-async function loadSocial(name){
-  const el=document.getElementById('social');
-  if(!el)return;
-  let rows;
-  try{ rows=await (await fetch('/api/social?name='+encodeURIComponent(name))).json(); }
-  catch(e){ el.innerHTML='<span class="muted">social check unavailable</span>'; return; }
-  if(!rows.length){ el.innerHTML='<span class="muted">-</span>'; return; }
-  const av=rows.filter(r=>r.verdict==='available').length;
-  const tk=rows.filter(r=>r.verdict==='taken').length;
-  const un=rows.length-av-tk;
+function startSiteChecks(){
+  if(CUR.site)return;
+  const registered=DOM_ITEMS.filter(x=>x.verdict==='taken'||x.verdict==='expiring').map(x=>x.domain);
+  if(!registered.length)return;
+  fetch('/api/sites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domains:registered})})
+    .then(r=>r.json()).then(d=>{CUR.site=d.job;}).catch(()=>{});
+}
+function renderSocial(){
+  const el=document.getElementById('social'); if(!el)return;
+  const rows=[...SOCIAL_ITEMS].sort((a,b)=>SOC_RANK[a.verdict]-SOC_RANK[b.verdict]);
+  const av=rows.filter(r=>r.verdict==='available').length, tk=rows.filter(r=>r.verdict==='taken').length, un=rows.length-av-tk;
   const cards=rows.map(r=>{
     const cls=r.verdict==='available'?'free':(r.verdict==='taken'?'taken':'pending');
-    return `<a class="card scard ${cls}" href="${esc(r.url)}" target="_blank" rel="noopener" title="${esc(r.url)}">`
-      +`${badge(r.verdict.toUpperCase(),r.level)} <b>${esc(r.network)}</b></a>`;
+    return `<a class="card scard ${cls}" href="${esc(r.url)}" target="_blank" rel="noopener" title="${esc(r.url)}">${badge(r.verdict.toUpperCase(),r.level)} <b>${esc(r.network)}</b></a>`;
   }).join('');
-  el.innerHTML=`<p>${badge(av+' available','good')} ${badge(tk+' taken','bad')} ${un?badge(un+' unknown','warn'):''}</p>`
-    +`<div class="cards">${cards}</div>`;
+  el.innerHTML=`<p>${badge(av+' available','good')} ${badge(tk+' taken','bad')} ${un?badge(un+' unknown','warn'):''}</p><div class="cards">${cards}</div>`;
 }
+function renderSidebar(){
+  const el=document.getElementById('jobsbar'); if(!el)return;
+  const jobs=Object.entries(JOBS).sort((a,b)=>b[1].ts-a[1].ts).slice(0,40);
+  el.innerHTML=`<div class="jb-h">Live jobs${jobs.length?` <small>(${jobs.length})</small>`:''}</div>`
+    +(jobs.length?jobs.map(([id,j])=>{
+      const pct=Math.round(100*j.done/(j.total||1)), done=j.done>=j.total;
+      return `<div class="jb-row"><div class="jb-t">${badge(j.kind,done?'good':'warn')} <b>${esc(j.name)}</b> <small>${j.done}/${j.total}</small></div>`
+        +`<div class="jb-bar"><div class="jb-fill${done?' done':''}" style="width:${pct}%"></div></div></div>`;
+    }).join(''):`<p class="muted" style="padding:.4rem .5rem">no jobs yet</p>`);
+}
+// compare needs the full domain list per name (not real-time): a blocking fetch
+async function fetchDomains(name){ try{return await (await fetch('/api/domains?name='+encodeURIComponent(name))).json();}catch(e){return [];} }
 function loadHistory(){try{return JSON.parse(localStorage.getItem('bah_history'))||[];}catch(e){return[];}}
 function saveHistory(d){
   const e=summarize(d);
@@ -1484,14 +1647,6 @@ function paintDot(dom,s){
   for(const dot of document.querySelectorAll('.sdot[data-d="'+dom+'"]')){
     dot.classList.remove('loading');dot.classList.add(s.ok?'on':'off');
     dot.title=s.ok?('live site: '+(s.title||s.finalUrl)):'registered, no website';}
-}
-async function runSiteChecks(domains){
-  if(!domains.length)return;
-  // one batch request; the server fans out across a 32-worker thread pool
-  try{
-    const res=await (await fetch('/api/sites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domains})})).json();
-    for(const dom of domains)if(res[dom])paintDot(dom,res[dom]);
-  }catch(err){}
 }
 function classesOf(m){
   const out=new Set();
@@ -1763,7 +1918,7 @@ function siteHtml(s){
 }
 document.getElementById('modalClose').addEventListener('click',()=>document.getElementById('modal').close());
 document.getElementById('modal').addEventListener('click',ev=>{ if(ev.target.id==='modal')ev.target.close(); });
-document.addEventListener('DOMContentLoaded',tick);
+document.addEventListener('DOMContentLoaded',()=>{tick();openJobs();});
 </script></body></html>"""
 
 
@@ -1786,6 +1941,33 @@ def _ws_text_frame(text: str) -> bytes:
     return header + data
 
 
+# Open /ws/jobs browser sockets; the pub/sub pump fans every job event out to them,
+# so every web instance's sidebar sees jobs from every worker/consumer.
+_ws_jobs_clients: set = set()
+_ws_jobs_lock = threading.Lock()
+
+
+def _jobs_pubsub_pump() -> None:
+    """Subscribe to the Valkey jobs channel and broadcast each event to all sidebars."""
+    if not _rds:
+        return
+    while True:
+        try:
+            sub = _rds.pubsub(ignore_subscribe_messages=True)
+            sub.subscribe(JOB_CHANNEL)
+            for message in sub.listen():
+                frame = _ws_text_frame(message["data"])
+                with _ws_jobs_lock:
+                    for wfile in list(_ws_jobs_clients):
+                        try:
+                            wfile.write(frame)
+                            wfile.flush()
+                        except OSError:
+                            _ws_jobs_clients.discard(wfile)
+        except (redis.exceptions.RedisError, OSError):
+            time.sleep(2)  # reconnect on broker blip
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"  # keep-alive + WebSocket upgrade
 
@@ -1806,8 +1988,7 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         return self.rfile.read(length).decode("utf-8") if length else ""
 
-    def _ws_domains(self, name: str) -> None:
-        """Upgrade to WebSocket and push each domain verdict as its worker finishes."""
+    def _ws_handshake(self) -> None:
         key = self.headers.get("Sec-WebSocket-Key", "")
         accept = base64.b64encode(
             hashlib.sha1((key + _WS_MAGIC).encode()).digest()
@@ -1817,25 +1998,40 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "Upgrade")
         self.send_header("Sec-WebSocket-Accept", accept)
         self.end_headers()
+
+    def _ws_jobs(self) -> None:
+        """Live feed of ALL jobs from ALL workers: backfill recent, then stream pub/sub."""
+        self._ws_handshake()
         try:
-            for row in domains_stream(name) if name else iter(()):
-                self.wfile.write(_ws_text_frame(json.dumps(row)))
+            if _rds:
+                for raw in _rds.zrange("jobs:recent", 0, -1):
+                    self.wfile.write(_ws_text_frame(raw))
                 self.wfile.flush()
-            self.wfile.write(b"\x88\x00")  # close frame
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError):
+        except (OSError, redis.exceptions.RedisError):
             pass
-        self.close_connection = True
+        with _ws_jobs_lock:
+            _ws_jobs_clients.add(self.wfile)
+        try:
+            while self.rfile.read(
+                1
+            ):  # block until the browser disconnects; pump does the writing
+                pass
+        except OSError:
+            pass
+        finally:
+            with _ws_jobs_lock:
+                _ws_jobs_clients.discard(self.wfile)
+            self.close_connection = True
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
         if (
-            path == "/ws/domains"
+            path == "/ws/jobs"
             and "websocket" in self.headers.get("Upgrade", "").lower()
         ):
-            self._ws_domains(query.get("name", [""])[0].strip())
+            self._ws_jobs()
             return
         if path in ("/", ""):
             self._send(PAGE)
@@ -1843,7 +2039,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(build_status())
         elif path == "/api/search":
             name = query.get("name", [""])[0].strip()
-            self._send_json(search_json(name) if name else {"name": "", "marks": []})
+            if not name:
+                self._send_json({"name": "", "marks": []})
+            else:
+                payload = search_json(name)
+                payload["domJob"] = enqueue_domains(name)
+                payload["socialJob"] = enqueue_social(normalize(name))
+                self._send_json(payload)
+        elif path == "/api/domains":  # blocking full list (compare view, not real-time)
+            name = query.get("name", [""])[0].strip()
+            self._send_json(list(domains_stream(name)) if name else [])
         elif path == "/api/domain":
             domain = urllib.parse.parse_qs(parsed.query).get("domain", [""])[0].strip()
             self._send_json(domain_detail(domain) if domain else {"error": "no domain"})
@@ -1869,7 +2074,7 @@ class Handler(BaseHTTPRequestHandler):
             domains = json.loads(self.rfile.read(length) or "{}").get("domains", [])[
                 :80
             ]
-            self._send_json(site_check_batch([str(d) for d in domains]))
+            self._send_json({"job": enqueue_sites([str(d) for d in domains])})
         else:
             self._send("not found", status=404)
 
@@ -1878,8 +2083,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve() -> None:
+    if _rds:  # bridge Valkey job events -> browser sidebars
+        threading.Thread(target=_jobs_pubsub_pump, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"INPI search UI on http://{HOST}:{PORT}  (db: {DB_PATH})")
+    print(f"INPI search UI on http://{HOST}:{PORT}")
     server.serve_forever()
 
 
