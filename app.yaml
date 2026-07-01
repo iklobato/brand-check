@@ -50,7 +50,7 @@ workers:
     git:
       branch: master
       repo_clone_url: https://github.com/iklobato/brand-check.git
-    run_command: celery -A app worker --pool=threads --concurrency=32 -Q checks,celery --loglevel=info
+    run_command: python -m celery -A app worker --pool=threads --concurrency=32 -Q checks,celery --loglevel=info
     instance_count: 1
     instance_size_slug: apps-s-1vcpu-0.5gb
     envs:
