@@ -1552,7 +1552,7 @@ let OUT_MARKS=[],CMP=[];
 async function onSearch(e){e.preventDefault();runSearch(document.getElementById('q').value.trim());}
 const CUR={name:'',dom:null,social:null,site:null};
 let DOM_ITEMS=[],SOCIAL_ITEMS=[],DOM_TOTAL=0;
-const JOBS={};
+const JOBS={},RESULTS={};   // RESULTS[jobId] = [result,...] buffered even before CUR is set (no lost early results)
 const SOC_RANK={available:0,unknown:1,taken:2};
 async function runSearch(name){
   const out=document.getElementById('out');
@@ -1562,10 +1562,12 @@ async function runSearch(name){
   const d=await (await fetch('/api/search?name='+encodeURIComponent(name))).json();
   OUT_MARKS=d.marks;
   CUR.name=name; CUR.dom=d.domJob; CUR.social=d.socialJob; CUR.site=null;
-  DOM_ITEMS=[]; SOCIAL_ITEMS=[]; DOM_TOTAL=0;
+  DOM_ITEMS=RESULTS[d.domJob]||[]; SOCIAL_ITEMS=RESULTS[d.socialJob]||[];
+  DOM_TOTAL=(JOBS[d.domJob]||{}).total||0;
   out.innerHTML=render(d);
+  renderDomains(); renderSocial();   // paint whatever the workers already delivered
   saveHistory(d);renderHistory();
-  // domains + social now run on the Celery workers; results arrive over the /ws/jobs feed
+  if(DOM_TOTAL&&DOM_ITEMS.length>=DOM_TOTAL)startSiteChecks();
   if(!d.domJob){const sum=document.getElementById('domsum');if(sum)sum.innerHTML='<span class="muted">workers offline</span>';}
 }
 // one WebSocket for ALL jobs from ALL workers: drives the sidebar + grid + social + dots
@@ -1582,10 +1584,11 @@ function onJob(m){
   JOBS[m.job]={kind:m.kind,name:m.name,done:m.done,total:m.total,ts:m.ts||Date.now()/1000};
   renderSidebar();
   if(m.result==null)return;   // backfill/summary rows carry no result
-  if(m.kind==='domains'&&m.job===CUR.dom){ DOM_TOTAL=m.total; DOM_ITEMS.push(m.result); renderDomains();
+  (RESULTS[m.job]=RESULTS[m.job]||[]).push(m.result);   // buffer by job so nothing is lost to timing
+  if(m.kind==='domains'&&m.job===CUR.dom){ DOM_TOTAL=m.total; DOM_ITEMS=RESULTS[m.job]; renderDomains();
     if(DOM_ITEMS.length>=m.total)startSiteChecks(); }
-  else if(m.kind==='social'&&m.job===CUR.social){ SOCIAL_ITEMS.push(m.result); renderSocial(); }
-  else if(m.kind==='sites'&&m.job===CUR.site&&m.result){ paintDot(m.result.domain,m.result); }
+  else if(m.kind==='social'&&m.job===CUR.social){ SOCIAL_ITEMS=RESULTS[m.job]; renderSocial(); }
+  else if(m.kind==='sites'&&m.job===CUR.site){ paintDot(m.result.domain,m.result); }
 }
 function renderDomains(){
   const grid=document.getElementById('domcards'), sum=document.getElementById('domsum');

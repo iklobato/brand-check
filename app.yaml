@@ -18,10 +18,10 @@ ingress:
           prefix: /
 services:
   - name: web
-    dockerfile_path: Dockerfile
-    git:
-      branch: master
-      repo_clone_url: https://github.com/iklobato/brand-check.git
+    image:
+      registry_type: DOCR
+      repository: gotchaped
+      tag: latest
     http_port: 8080
     instance_count: 1
     instance_size_slug: professional-xs
@@ -30,36 +30,35 @@ services:
       port: 8080
     envs:
       - key: HOST
-        scope: RUN_AND_BUILD_TIME
         value: "0.0.0.0"
       - key: DATABASE_URL
         scope: RUN_TIME
         value: ${inpi-pg.DATABASE_URL}
       - key: CELERY_BROKER_URL
         scope: RUN_TIME
-        value: ${financialdata-valkey.DATABASE_URL}
+        value: ${financialdata-valkey.DATABASE_URL}?ssl_cert_reqs=CERT_REQUIRED
       - key: CELERY_RESULT_BACKEND
         scope: RUN_TIME
-        value: ${financialdata-valkey.DATABASE_URL}
+        value: ${financialdata-valkey.DATABASE_URL}?ssl_cert_reqs=CERT_REQUIRED
       - key: VALKEY_URL
         scope: RUN_TIME
         value: ${financialdata-valkey.DATABASE_URL}
 workers:
   - name: celery-worker
-    dockerfile_path: Dockerfile
-    git:
-      branch: master
-      repo_clone_url: https://github.com/iklobato/brand-check.git
+    image:
+      registry_type: DOCR
+      repository: gotchaped
+      tag: latest
     run_command: python -m celery -A app worker --pool=threads --concurrency=32 -Q checks,celery --loglevel=info
     instance_count: 1
     instance_size_slug: apps-s-1vcpu-0.5gb
     envs:
       - key: CELERY_BROKER_URL
         scope: RUN_TIME
-        value: ${financialdata-valkey.DATABASE_URL}
+        value: ${financialdata-valkey.DATABASE_URL}?ssl_cert_reqs=CERT_REQUIRED
       - key: CELERY_RESULT_BACKEND
         scope: RUN_TIME
-        value: ${financialdata-valkey.DATABASE_URL}
+        value: ${financialdata-valkey.DATABASE_URL}?ssl_cert_reqs=CERT_REQUIRED
       - key: VALKEY_URL
         scope: RUN_TIME
         value: ${financialdata-valkey.DATABASE_URL}
