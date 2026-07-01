@@ -1,0 +1,548 @@
+<!doctype html><html lang="en" data-theme="dark"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Brand check</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css">
+<script src="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
+<style>
+ main{max-width:1180px}
+ .exlbl{display:inline-flex;align-items:center;gap:.4rem;font-size:.82rem;color:var(--pico-muted-color);margin:.4rem 0 0;cursor:pointer}
+ .exlbl input{width:auto;margin:0}
+ #jobsbar{position:fixed;top:0;right:0;width:230px;height:100vh;overflow:auto;z-index:50;
+   background:var(--pico-card-background-color);border-left:1px solid var(--pico-muted-border-color);
+   font-size:.76rem;padding-bottom:1rem}
+ #jobsbar:empty{display:none}
+ .jb-h{position:sticky;top:0;background:var(--pico-card-sectioning-background-color);
+   padding:.4rem .5rem;font-weight:600;border-bottom:1px solid var(--pico-muted-border-color)}
+ .jb-row{padding:.3rem .5rem;border-bottom:1px solid var(--pico-muted-border-color)}
+ .jb-t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .jb-bar{height:5px;background:var(--pico-muted-border-color);border-radius:3px;margin-top:.25rem;overflow:hidden}
+ .jb-fill{height:100%;background:#e67e22;transition:width .2s}
+ .jb-fill.done{background:#27ae60}
+ @media(max-width:1100px){#jobsbar{display:none}}
+ /* wide screens: reserve the fixed jobs panel's column (padding-right shrinks main's box) + even gutters */
+ @media(min-width:1101px){body{padding-right:250px}main.container{padding-inline:2.5rem}}
+ #q{font-size:1rem}
+ .badge{color:#fff;padding:.08rem .42rem;border-radius:5px;font-size:.72rem;font-weight:600;white-space:nowrap}
+ .muted{color:var(--pico-muted-color)}
+ .vtl{margin:.3rem 0;font-size:.78rem}
+ .vtl .vis-item{border-color:#9aa0a6;background:var(--pico-card-background-color)}
+ .vtl .vis-item.dt-good{background:#dff5e3;border-color:#27ae60}
+ .vtl .vis-item.dt-bad{background:#fbe0dd;border-color:#c0392b}
+ .vtl .vis-item.dt-opp{background:#fdebd6;border-color:#e67e22}
+ .vtl .vis-item.dt-arch{background:#ececec;border-color:#9aa0a6}
+ .tl-legend{display:flex;flex-wrap:wrap;gap:.4rem;margin:.35rem 0;font-size:.7rem}
+ .sdot{width:.6rem;height:.6rem;border-radius:50%;flex:none;background:#cbd0d4}
+ .sdot.loading{background:#cbd0d4;animation:pulse 1s infinite}
+ .sdot.on{background:#27ae60}
+ .sdot.off{background:#c0392b}
+ @keyframes pulse{50%{opacity:.35}}
+ .shot{display:block;width:100%;max-width:520px;border:1px solid var(--pico-muted-border-color);border-radius:8px;margin:.4rem 0}
+ .curl{font-size:.72rem;background:#1e1e1e;color:#d6d6d6;padding:.5rem .7rem;border-radius:6px;overflow:auto;white-space:pre}
+ .hist{margin:.4rem 0;font-size:.82rem}
+ .histrows{display:flex;flex-wrap:wrap;gap:.5rem;margin:.4rem 0}
+ .histrows label{display:flex;align-items:center;gap:.3rem;cursor:pointer}
+ .hname{cursor:pointer;text-decoration:underline dotted;font-weight:600}
+ .histbtns{display:flex;gap:.5rem;margin-top:.5rem}
+ .cmp2-head{display:flex;align-items:center;gap:.8rem;margin:.3rem 0}
+ .cmp2-head h3{margin:0}
+ .cmp2-head button,.heathead button,.histbtns button{width:auto;padding:.15rem .7rem;font-size:.78rem;margin:0}
+ .scores{display:grid;grid-template-columns:repeat(var(--n),1fr);gap:.6rem;margin:.5rem 0}
+ .score{padding:.55rem .75rem;border:1px solid var(--pico-muted-border-color);border-radius:10px}
+ .score.win{border-color:#27ae60;box-shadow:inset 0 0 0 1px #27ae60;background:rgba(39,174,96,.06)}
+ .sname{font-size:1.05rem;margin-bottom:.2rem}
+ .sstat{font-size:.82rem;margin-top:.25rem}
+ .heathead{display:flex;align-items:center;gap:.8rem;flex-wrap:wrap;margin:.7rem 0 .2rem}
+ .heathead h4{margin:0}
+ .legend{font-size:.72rem;color:var(--pico-muted-color);display:flex;align-items:center;gap:.3rem;flex-wrap:wrap}
+ .heat{display:flex;flex-direction:column;gap:1px;margin:.2rem 0}
+ .hrow{display:grid;grid-template-columns:7rem repeat(var(--n),1fr);gap:.4rem;align-items:center;padding:.08rem .2rem;border-radius:4px}
+ .hrow.diff{background:var(--pico-code-background-color)}
+ .hrow.head .hname{font-weight:600;font-size:.8rem;text-align:center}
+ .hlbl{font-size:.78rem;color:var(--pico-muted-color);white-space:nowrap}
+ .heat .agree{display:none}
+ .heat.all .agree{display:grid}
+ .hdot{width:.85rem;height:.85rem;border-radius:50%;display:inline-block;margin:0 auto;cursor:pointer}
+ .hdot.good{background:#27ae60}.hdot.warn{background:#e67e22}.hdot.bad{background:#c0392b}
+ .hcell{text-align:center;color:var(--pico-muted-color)}
+ .tmgrid{display:grid;grid-template-columns:repeat(var(--n),1fr);gap:.6rem;margin:.3rem 0}
+ .tmchips{display:flex;flex-direction:column;gap:.2rem;margin-top:.3rem}
+ .tmchip{cursor:pointer;font-size:.78rem;border:1px solid var(--pico-muted-border-color);border-radius:5px;padding:.12rem .45rem}
+ .tmchip:hover{background:var(--pico-code-background-color)}
+ a.scard{text-decoration:none;color:inherit}
+ ul.spec{list-style:none;display:flex;flex-wrap:wrap;gap:.25rem;margin:.1rem 0;padding:0}
+ ul.spec li{font-size:.74rem;background:var(--pico-code-background-color);border:1px solid var(--pico-muted-border-color);
+   border-radius:5px;padding:.06rem .4rem}
+ .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:.3rem;margin-top:.5rem}
+ .card{display:flex;align-items:center;gap:.35rem;cursor:pointer;font-size:.78rem;
+   padding:.25rem .5rem;border:1px solid var(--pico-muted-border-color);border-left:4px solid #9aa0a6;
+   border-radius:6px;white-space:nowrap;overflow:hidden}
+ .card:hover{background:var(--pico-code-background-color)}
+ .card.taken{border-left-color:#c0392b}
+ .card.pending{border-left-color:#e67e22}
+ .card.free{border-left-color:#27ae60}
+ .card .badge{font-size:.6rem;padding:.04rem .3rem}
+ .card b{overflow:hidden;text-overflow:ellipsis}
+ .card .cl{font-weight:600;color:var(--pico-muted-color);flex:none}
+ .card .flag{margin-left:auto;font-size:.68rem;color:var(--pico-muted-color);flex:none}
+ #modal article{max-width:980px;width:94%}
+ #modalTitle strong{font-size:1.05rem}
+ .msub{display:flex;align-items:center;gap:.5rem;margin:.1rem 0 .7rem;color:var(--pico-muted-color)}
+ .facts{display:grid;grid-template-columns:max-content 1fr;gap:.2rem .8rem;margin:0 0 .4rem}
+ .facts>dt{font-weight:600;color:var(--pico-muted-color)}
+ .facts>dd{margin:0}
+ .src{border:1px solid var(--pico-muted-border-color);border-radius:8px;padding:.45rem .7rem;margin:.55rem 0;
+   background:var(--pico-card-sectioning-background-color)}
+ .src>h6{margin:0 0 .35rem;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;color:var(--pico-muted-color)}
+ .fields{display:grid;grid-template-columns:max-content 1fr;gap:.12rem .7rem;margin:0;font-size:.82rem}
+ .fields>dt{font-weight:600;color:var(--pico-muted-color);white-space:nowrap}
+ .fields>dd{margin:0;word-break:break-word}
+ .fields+.fields{margin-top:.35rem;padding-top:.35rem;border-top:1px dashed var(--pico-muted-border-color)}
+ .src .more{font-size:.74rem;color:var(--pico-muted-color);margin:.3rem 0 0}
+</style></head><body><main class="container">
+<hgroup><h1>Brand check</h1>
+<p>Type one brand name. You get domain availability and every matching INPI trademark (all sources, all classes) right here. First-pass only, not legal clearance.</p></hgroup>
+<div id="app"><article aria-busy="true">Loading...</article></div>
+</main>
+<aside id="jobsbar"></aside>
+<dialog id="modal"><article>
+  <header><button aria-label="Close" rel="prev" id="modalClose"></button><span id="modalTitle"></span></header>
+  <div id="modalBody"></div>
+</article></dialog>
+<script>
+const COLORS={bad:'#c0392b',warn:'#e67e22',good:'#27ae60'};
+const app=document.getElementById('app');
+function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
+function badge(t,l){return `<span class="badge" style="background:${COLORS[l]}">${esc(t)}</span>`;}
+
+function showSearch(){
+  app.innerHTML=`
+   <form id="f" role="search"><input id="q" name="q" placeholder="brand name (e.g. rafaela)" autocomplete="off" autofocus>
+     <label class="exlbl"><input type="checkbox" id="exact"> Exact name only (INPI)</label></form>
+   <div id="hist"></div>
+   <div id="out"></div>`;
+  document.getElementById('f').addEventListener('submit',onSearch);
+  renderHistory();
+  // delegate clicks once on the stable #out (single-search cards AND the compare view)
+  document.getElementById('out').addEventListener('click',ev=>{
+    if(ev.target.id==='cmpBack'){runSearch(document.getElementById('q').value.trim()||CMP[0]&&CMP[0].name);return;}
+    if(ev.target.id==='tldToggle'){const heat=document.getElementById('heat');
+      const on=heat.classList.toggle('all');
+      ev.target.textContent=on?'show only differences':('show all '+ev.target.dataset.n);return;}
+    const cmp=ev.target.closest('[data-cmp]');                 // compare conflict chip
+    if(cmp){const[col,i]=cmp.dataset.cmp.split('.').map(Number);MARKS=CMP[col].marks;openModal(i);return;}
+    const dom=ev.target.closest('[data-domain]');              // single card OR heatmap dot
+    if(dom){openDomainModal(dom.dataset.domain);return;}
+    const card=ev.target.closest('.card[data-i]');             // single-search mark card
+    if(card){MARKS=OUT_MARKS;openModal(+card.dataset.i);}
+  });
+  // history strip: click a name to re-run, tick names + Compare, or Clear
+  document.getElementById('hist').addEventListener('click',ev=>{
+    if(ev.target.id==='clrBtn'){localStorage.removeItem('bah_history');renderHistory();return;}
+    if(ev.target.id==='cmpBtn'){
+      const names=[...document.querySelectorAll('#hist input:checked')].map(c=>c.value);
+      if(names.length<2||names.length>4){alert('Pick 2 to 4 names to compare');return;}
+      openCompare(names);return;}
+    const n=ev.target.closest('.hname');
+    if(n)runSearch(n.dataset.name);
+  });
+}
+const SITE={};
+let OUT_MARKS=[],CMP=[];
+async function onSearch(e){e.preventDefault();runSearch(document.getElementById('q').value.trim());}
+const CUR={name:'',dom:null,social:null,site:null};
+let DOM_ITEMS=[],SOCIAL_ITEMS=[],DOM_TOTAL=0;
+const JOBS={},RESULTS={};   // RESULTS[jobId] = [result,...] buffered even before CUR is set (no lost early results)
+const SOC_RANK={available:0,unknown:1,taken:2};
+async function runSearch(name){
+  const out=document.getElementById('out');
+  if(!name){out.innerHTML='';return;}
+  document.getElementById('q').value=name;
+  out.innerHTML='<article aria-busy="true">Searching '+esc(name)+'...</article>';
+  const exEl=document.getElementById('exact'), exact=exEl&&exEl.checked?'1':'0';
+  const d=await (await fetch('/api/search?name='+encodeURIComponent(name)+'&exact='+exact)).json();
+  OUT_MARKS=d.marks;
+  CUR.name=name; CUR.dom=d.domJob||null; CUR.social=d.socialJob||null; CUR.site=null;
+  // cached hit -> use stored results directly (no worker job); else buffer whatever streamed in
+  DOM_ITEMS=d.domCached||RESULTS[d.domJob]||[];
+  SOCIAL_ITEMS=d.socialCached||RESULTS[d.socialJob]||[];
+  DOM_TOTAL=d.domCached?d.domCached.length:((JOBS[d.domJob]||{}).total||0);
+  out.innerHTML=render(d);
+  renderDomains(); renderSocial();   // paint whatever the workers already delivered
+  saveHistory(d);renderHistory();
+  if(DOM_TOTAL&&DOM_ITEMS.length>=DOM_TOTAL)startSiteChecks();
+  // job may have finished before we set CUR: no more live msgs will arrive, so reconcile from durable list
+  const dj=JOBS[d.domJob],sj=JOBS[d.socialJob];
+  if(dj&&dj.done>=dj.total&&DOM_ITEMS.length<dj.total)reconcile(d.domJob,'domains');
+  if(sj&&sj.done>=sj.total&&SOCIAL_ITEMS.length<sj.total)reconcile(d.socialJob,'social');
+  if(!d.domJob&&!d.domCached){const sum=document.getElementById('domsum');if(sum)sum.innerHTML='<span class="muted">workers offline</span>';}
+}
+// one WebSocket for ALL jobs from ALL workers: drives the sidebar + grid + social + dots
+let JOBWS=null;
+function openJobs(){
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  try{ JOBWS=new WebSocket(proto+'//'+location.host+'/ws/jobs'); }catch(e){ return; }
+  JOBWS.onmessage=ev=>{ let m; try{m=JSON.parse(ev.data);}catch(e){return;} onJob(m); };
+  JOBWS.onclose=()=>setTimeout(openJobs,2500);   // auto-reconnect
+  JOBWS.onerror=()=>{ try{JOBWS.close();}catch(e){} };
+}
+function onJob(m){
+  if(!m||!m.job)return;
+  JOBS[m.job]={kind:m.kind,name:m.name,done:m.done,total:m.total,ts:m.ts||Date.now()/1000};
+  renderSidebar();
+  if(m.result==null)return;   // backfill/summary rows carry no result
+  (RESULTS[m.job]=RESULTS[m.job]||[]).push(m.result);   // buffer by job so nothing is lost to timing
+  const done=m.done>=m.total;
+  if(m.kind==='domains'&&m.job===CUR.dom){ DOM_TOTAL=m.total; DOM_ITEMS=RESULTS[m.job]; renderDomains();
+    if(done){ if(DOM_ITEMS.length<m.total)reconcile(m.job,'domains'); else startSiteChecks(); } }
+  else if(m.kind==='social'&&m.job===CUR.social){ SOCIAL_ITEMS=RESULTS[m.job]; renderSocial();
+    if(done&&SOCIAL_ITEMS.length<m.total)reconcile(m.job,'social'); }
+  else if(m.kind==='sites'&&m.job===CUR.site){ paintDot(m.result.domain,m.result);
+    if(done)reconcile(m.job,'sites'); }
+}
+// pub/sub is lossy: when a job is done but we hold fewer results than total, pull the durable list
+async function reconcile(jid,kind){
+  try{
+    const full=await (await fetch('/api/job?id='+encodeURIComponent(jid))).json();
+    if(!full||!full.length)return;
+    RESULTS[jid]=full;
+    if(kind==='domains'&&jid===CUR.dom){ DOM_ITEMS=full; renderDomains(); if(DOM_TOTAL&&DOM_ITEMS.length>=DOM_TOTAL)startSiteChecks(); }
+    else if(kind==='social'&&jid===CUR.social){ SOCIAL_ITEMS=full; renderSocial(); }
+    else if(kind==='sites'&&jid===CUR.site){ for(const s of full)paintDot(s.domain,s); }
+  }catch(e){}
+}
+function renderDomains(){
+  const grid=document.getElementById('domcards'), sum=document.getElementById('domsum');
+  if(!grid)return;
+  const items=[...DOM_ITEMS].sort((a,b)=>DOM_RANK[a.verdict]-DOM_RANK[b.verdict]);
+  grid.innerHTML=items.map(domCard).join('');
+  if(sum)sum.innerHTML=domSummaryHtml(domCounts(items))+(DOM_ITEMS.length<DOM_TOTAL?' <span aria-busy="true"></span>':'');
+  const h=loadHistory(); if(h[0]&&h[0].name===CUR.name){h[0].dom=domCounts(items);try{localStorage.setItem('bah_history',JSON.stringify(h));}catch(e){}}
+}
+function startSiteChecks(){
+  if(CUR.site)return;
+  const domains=DOM_ITEMS.map(x=>x.domain);   // probe every domain, available ones included
+  if(!domains.length)return;
+  fetch('/api/sites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domains,name:CUR.name})})
+    .then(r=>r.json()).then(d=>{
+      if(d.cached){for(const s of d.cached)paintDot(s.domain,s);}   // stored results: paint dots directly
+      else{CUR.site=d.job;}
+    }).catch(()=>{});
+}
+function renderSocial(){
+  const el=document.getElementById('social'); if(!el)return;
+  const rows=[...SOCIAL_ITEMS].sort((a,b)=>SOC_RANK[a.verdict]-SOC_RANK[b.verdict]);
+  const av=rows.filter(r=>r.verdict==='available').length, tk=rows.filter(r=>r.verdict==='taken').length, un=rows.length-av-tk;
+  const cards=rows.map(r=>{
+    const cls=r.verdict==='available'?'free':(r.verdict==='taken'?'taken':'pending');
+    return `<a class="card scard ${cls}" href="${esc(r.url)}" target="_blank" rel="noopener" title="${esc(r.url)}">${badge(r.verdict.toUpperCase(),r.level)} <b>${esc(r.network)}</b></a>`;
+  }).join('');
+  el.innerHTML=`<p>${badge(av+' available','good')} ${badge(tk+' taken','bad')} ${un?badge(un+' unknown','warn'):''}</p><div class="cards">${cards}</div>`;
+}
+function renderSidebar(){
+  const el=document.getElementById('jobsbar'); if(!el)return;
+  const jobs=Object.entries(JOBS).sort((a,b)=>b[1].ts-a[1].ts).slice(0,40);
+  el.innerHTML=`<div class="jb-h">Live jobs${jobs.length?` <small>(${jobs.length})</small>`:''}</div>`
+    +(jobs.length?jobs.map(([id,j])=>{
+      const pct=Math.round(100*j.done/(j.total||1)), done=j.done>=j.total;
+      return `<div class="jb-row"><div class="jb-t">${badge(j.kind,done?'good':'warn')} <b>${esc(j.name)}</b> <small>${j.done}/${j.total}</small></div>`
+        +`<div class="jb-bar"><div class="jb-fill${done?' done':''}" style="width:${pct}%"></div></div></div>`;
+    }).join(''):`<p class="muted" style="padding:.4rem .5rem">no jobs yet</p>`);
+}
+// compare needs the full domain list per name (not real-time): a blocking fetch
+async function fetchDomains(name){ try{return await (await fetch('/api/domains?name='+encodeURIComponent(name))).json();}catch(e){return [];} }
+function loadHistory(){try{return JSON.parse(localStorage.getItem('bah_history'))||[];}catch(e){return[];}}
+function saveHistory(d){
+  const e=summarize(d);
+  const h=loadHistory().filter(x=>x.name!==e.name);
+  h.unshift(e);
+  try{localStorage.setItem('bah_history',JSON.stringify(h.slice(0,20)));}catch(err){}
+}
+function renderHistory(){
+  const h=loadHistory(),el=document.getElementById('hist');
+  if(!el)return;
+  if(!h.length){el.innerHTML='';return;}
+  el.innerHTML=`<details class="hist"><summary>History (${h.length}) &mdash; tick 2-4 to compare</summary><div class="histrows">`
+    +h.map(e=>`<label><input type="checkbox" value="${esc(e.name)}"> `
+      +`<span class="hname" data-name="${esc(e.name)}">${esc(e.name)}</span> `
+      +`${badge(e.dom.available+' free','good')}${badge((e.mark.taken||0)+' tm','bad')}</label>`).join('')
+    +`</div><div class="histbtns"><button id="cmpBtn" class="secondary outline">Compare</button> `
+    +`<button id="clrBtn" class="secondary outline">Clear</button></div></details>`;
+}
+function paintDot(dom,s){
+  SITE[dom]=s;
+  for(const dot of document.querySelectorAll('.sdot[data-d="'+dom+'"]')){
+    dot.classList.remove('loading');dot.classList.add(s.ok?'on':'off');
+    dot.title=s.ok?('live site: '+(s.title||s.finalUrl)):'no website';}
+}
+function classesOf(m){
+  const out=new Set();
+  for(const r of (m.related.nice||{rows:[]}).rows) if(r.classe_nice) out.add('NCL '+r.classe_nice);
+  for(const r of (m.related.nacionais||{rows:[]}).rows) if(r.classe) out.add('cl '+r.classe);
+  return [...out].join(', ');
+}
+function ownerOf(m){
+  const r=(m.related.depositantes||{rows:[]}).rows[0];
+  return r&&r.nome?r.nome:'';
+}
+const AVAIL_LABEL={taken:'TAKEN',pending:'PENDING',free:'FREE'};
+let MARKS=[];
+const DOM_CLASS={available:'free',expiring:'pending',taken:'taken',unknown:'pending'};
+const DOM_RANK={available:0,expiring:1,unknown:2,taken:3};
+function domCounts(list){
+  const dom={available:0,expiring:0,taken:0,unknown:0};
+  for(const x of list||[])dom[x.verdict]=(dom[x.verdict]||0)+1;
+  return dom;
+}
+function summarize(d){
+  const mark={free:0,pending:0,taken:0};
+  for(const m of d.marks)mark[m.availability]=(mark[m.availability]||0)+1;
+  return {name:d.name,t:Date.now(),dom:domCounts(d.domains),mark};
+}
+function domSummaryHtml(dom){
+  return `${badge(dom.available+' available','good')} `
+    +`${dom.expiring?badge(dom.expiring+' expiring','warn')+' ':''}${badge(dom.taken+' taken','bad')} `
+    +`${dom.unknown?badge(dom.unknown+' unknown','warn'):''}`;
+}
+function render(d){
+  const s=summarize(d);
+  let h=`<h3>${esc(d.name)}</h3>`;
+  // Domains: streamed in real time (each TLD card appears as its worker finishes)
+  h+=`<h4>Domains</h4>`;
+  h+=`<p id="domsum"><span aria-busy="true">checking domains...</span></p>`;
+  h+=`<div id="domcards" class="cards"></div>`;
+  // Social handles (filled in the background, maigret-style)
+  h+='<h4>Social handles <small>(maigret-style, best-effort)</small></h4>'
+    +'<div id="social"><span class="muted">checking handles &hellip;</span></div>';
+  // INPI marks
+  h+='<h4>INPI trademark <small>(all classes)</small></h4>';
+  if(!d.marks.length)return h+`<p>${badge('CLEAR','good')} No identical, overlapping, or similar mark found.</p>`;
+  const sum=`<p>${d.marks.length} marks &middot; ${badge(s.mark.free+' available','good')} `
+    +`${badge(s.mark.pending+' pending','warn')} ${badge(s.mark.taken+' in force','bad')}</p>`;
+  return h+sum+`<div class="cards">`+d.marks.map(card).join('')+'</div>';
+}
+function domCard(x){
+  return `<div class="card ${DOM_CLASS[x.verdict]}" data-domain="${esc(x.domain)}" title="click for registration + site snapshot">
+    <span class="sdot loading" data-d="${esc(x.domain)}"></span>
+    ${badge(x.verdict.toUpperCase(),x.level)}
+    <b>${esc(x.domain)}</b>
+  </div>`;
+}
+function card(m,i){
+  const cls=classesOf(m);
+  return `<div class="card ${m.availability}" data-i="${i}" title="click for full detail">
+    ${badge(AVAIL_LABEL[m.availability],m.availLevel)}
+    <b>${esc(m.name)}</b>
+    ${cls?`<small class="cl">${esc(cls)}</small>`:''}
+    <span class="flag">${esc(m.flag)}</span>
+  </div>`;
+}
+// ---- side-by-side compare: scorecards + diff heatmap (full-width, in #out) ----
+function tldOf(dom){return dom.replace(/^[^.]*/,'');}   // rafaela.com.br -> .com.br
+function cmpScore(d){const s=summarize(d);return {name:d.name,free:s.dom.available,expiring:s.dom.expiring,total:d.domains.length,inforce:s.mark.taken};}
+function renderCompare(results){
+  const n=results.length;
+  const cards=results.map(cmpScore);
+  // winner: most free domains, then fewest in-force marks
+  const best=[...cards].sort((a,b)=>b.free-a.free||a.inforce-b.inforce)[0];
+  let h=`<div class="cmp2"><div class="cmp2-head"><button class="secondary outline" id="cmpBack">&larr; Back</button><h3>Comparing ${n}</h3></div>`;
+  // scorecards
+  h+=`<div class="scores" style="--n:${n}">`+cards.map(c=>`<article class="score${c===best?' win':''}">
+    <div class="sname">${c===best?'&#9733; ':''}<b>${esc(c.name)}</b></div>
+    ${c===best?badge('BEST PICK','good'):'<span class="muted" style="font-size:.75rem">candidate</span>'}
+    <div class="sstat"><b>${c.free}</b>/${c.total} domains free</div>
+    ${c.expiring?`<div class="sstat muted">${c.expiring} expiring soon</div>`:''}
+    <div class="sstat">${c.inforce?badge(c.inforce+' in-force marks','bad'):badge('no in-force marks','good')}</div>
+  </article>`).join('')+`</div>`;
+  // domain diff heatmap
+  const tlds=[];for(const d of results)for(const x of d.domains){const t=tldOf(x.domain);if(!tlds.includes(t))tlds.push(t);}
+  const byTld=results.map(d=>{const m={};for(const x of d.domains)m[tldOf(x.domain)]=x;return m;});
+  const rank=t=>Math.min(...byTld.map(m=>m[t]?DOM_RANK[m[t].verdict]:99));
+  tlds.sort((a,b)=>rank(a)-rank(b));
+  let diffs=0;
+  const rows=tlds.map(t=>{
+    const cells=byTld.map(m=>m[t]),present=cells.filter(Boolean);
+    const agree=present.length===n&&present.every(x=>x.verdict===present[0].verdict);
+    if(!agree)diffs++;
+    const c=cells.map(x=>x?`<span class="hdot ${x.level}" data-domain="${esc(x.domain)}" title="${esc(x.domain)}: ${esc(x.verdict)}"></span>`:'<span class="hcell muted">-</span>').join('');
+    return `<div class="hrow ${agree?'agree':'diff'}"><span class="hlbl">${esc(t)}</span>${c}</div>`;
+  }).join('');
+  h+=`<div class="heathead"><h4>Domains</h4>`
+    +`<button class="secondary outline" id="tldToggle" data-n="${tlds.length}">show all ${tlds.length}</button>`
+    +`<span class="legend"><span class="hdot good"></span>free <span class="hdot warn"></span>expiring/unknown <span class="hdot bad"></span>taken</span></div>`;
+  h+=`<div class="heat" id="heat" style="--n:${n}"><div class="hrow head"><span class="hlbl"></span>`
+    +results.map(d=>`<span class="hname">${esc(d.name)}</span>`).join('')+`</div>`+rows+`</div>`;
+  h+=diffs?`<p class="muted">${diffs} TLD${diffs>1?'s':''} differ; the rest agree (hidden).</p>`:`<p class="muted">All TLDs agree across these names.</p>`;
+  // in-force trademark conflicts per name
+  h+=`<h4>In-force trademark conflicts</h4><div class="tmgrid" style="--n:${n}">`;
+  h+=results.map((d,col)=>{
+    const hits=d.marks.map((m,i)=>({m,i})).filter(x=>x.m.availability==='taken');
+    const top=hits.slice(0,6).map(x=>`<span class="tmchip" data-cmp="${col}.${x.i}">${esc(x.m.name)}<small> ${esc(classesOf(x.m)||'')}</small></span>`).join('');
+    return `<div class="tmcol"><b>${esc(d.name)}</b> ${hits.length?badge(hits.length+' in force','bad'):badge('clear','good')}`
+      +`<div class="tmchips">${top||'<span class="muted">no in-force conflicts</span>'}${hits.length>6?`<span class="muted">+${hits.length-6} more</span>`:''}</div></div>`;
+  }).join('')+`</div>`;
+  return h+`</div>`;
+}
+async function openCompare(names){
+  const out=document.getElementById('out');
+  out.innerHTML='<article aria-busy="true">Comparing '+names.length+' names...</article>';
+  CMP=await Promise.all(names.map(async n=>{
+    const [s,domains]=await Promise.all([
+      fetch('/api/search?name='+encodeURIComponent(n)).then(r=>r.json()).catch(()=>({marks:[]})),
+      fetchDomains(n).catch(()=>[])
+    ]);
+    return {name:n, marks:s.marks||[], domains};
+  }));
+  out.innerHTML=renderCompare(CMP);
+  window.scrollTo(0,0);
+}
+const FIELD_LABELS={classe:'National class',classe_nice:'NICE class',primeira_subclasse:'Subclass 1',
+  segunda_subclasse:'Subclass 2',terceira_subclasse:'Subclass 3',especificacao:'Specification',
+  especificacao_trad:'Specification (EN)',edicao_nice:'NICE edition',simbolo:'Symbol',
+  classificacao_viena:'Vienna class',revisao_viena:'Vienna revision',nome:'Name',
+  cnpj_cpf_titular:'Tax ID',tipo_pfpj_titular:'Holder type',nome_representante_legal:'Legal rep',
+  cnpj_cpf_representante_legal:'Legal rep tax ID',tipo_pfpj_representante_legal:'Legal rep type',
+  estado:'State',pais:'Country',numero_rpi:'Gazette no.',data_rpi:'Gazette date',
+  codigo_despacho:'Code',descricao_despacho:'Dispatch',complemento_despacho:'Note',
+  pais_prioridade:'Priority country',numero_prioridade:'Priority no.',data_prioridade:'Priority date'};
+const SOURCE_LABELS={nacionais:'National classification',nice:'NICE classification',
+  viena:'Vienna (figurative)',depositantes:'Applicant / owner',despachos:'Dispatch history',
+  prioridades:'Priority claim'};
+function prettyKey(k){return FIELD_LABELS[k]||k.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());}
+function fieldValue(k,v){
+  // Specification fields are long ";"-delimited lists of goods/services -> render as chips
+  if(k==='especificacao'||k==='especificacao_trad'){
+    const parts=String(v).split(';').map(s=>s.trim()).filter(Boolean);
+    if(parts.length>1)return `<ul class="spec">`+parts.map(p=>`<li>${esc(p)}</li>`).join('')+`</ul>`;
+  }
+  return esc(v);
+}
+function fields(row){
+  const items=Object.entries(row).filter(([k,v])=>k!=='numero_inpi'&&v!=='').map(([k,v])=>
+    `<dt>${esc(prettyKey(k))}</dt><dd>${fieldValue(k,v)}</dd>`).join('');
+  return `<dl class="fields">${items}</dl>`;
+}
+const fmtDate=s=>s?String(s).slice(0,10):'';
+const NOW=new Date();
+function daysUntil(d){const t=new Date(String(d||'').slice(0,10));return isNaN(t)?null:Math.round((t-NOW)/864e5);}
+function plural(n){return n===1?'day':'days';}
+function expiryBadge(d){const n=daysUntil(d);if(n===null)return '';
+  if(n<0)return ' '+badge('EXPIRED','bad')+` <small class="muted">${-n} ${plural(-n)} ago</small>`;
+  if(n<180)return ' '+badge('EXPIRES SOON','warn')+` <small class="muted">in ${n} ${plural(n)}</small>`;
+  return ` <small class="muted">in ${n} ${plural(n)}</small>`;}
+function despachoClass(desc){const s=(desc||'').toLowerCase();
+  if(s.includes('oposi'))return 'dt-opp';
+  if(s.includes('indefer')||s.includes('nulidade')||s.includes('extin')||s.includes('cancel'))return 'dt-bad';
+  if(s.includes('deferid')||s.includes('concedid')||s.includes('concess')||s.includes('prorrog'))return 'dt-good';
+  if(s.includes('arquiv'))return 'dt-arch';
+  return 'dt-neu';}
+function openModal(i){
+  const m=MARKS[i],cls=classesOf(m),owner=ownerOf(m);
+  document.getElementById('modalTitle').innerHTML=
+    `${badge(AVAIL_LABEL[m.availability],m.availLevel)} <strong>${esc(m.name)}</strong>`;
+  let h=`<div class="msub">${badge(m.flag,m.level)}<span>${esc(m.status||'-')}</span></div>
+    <dl class="facts">
+      ${cls?`<dt>Class</dt><dd>${esc(cls)}</dd>`:''}
+      ${owner?`<dt>Owner</dt><dd>${esc(owner)} <span id="ownerCompany" class="muted"></span></dd>`:''}
+      <dt>Process</dt><dd>${esc(m.processo)}</dd>
+      ${m.deposito?`<dt>Deposited</dt><dd>${esc(fmtDate(m.deposito))}</dd>`:''}
+      ${m.concessao?`<dt>Granted</dt><dd>${esc(fmtDate(m.concessao))}</dd>`:''}
+      ${m.vigencia?`<dt>Valid until</dt><dd>${esc(fmtDate(m.vigencia))}${expiryBadge(m.vigencia)}</dd>`:''}
+    </dl>`;
+  for(const[table,info]of Object.entries(m.related)){
+    const n=info.rows.length;
+    const inner = table==='despachos'
+      ? `<div id="dispatchTimeline" class="vtl"></div><div class="tl-legend">${badge('grant/renewal','good')} ${badge('opposition','warn')} ${badge('rejection/extinction','bad')}</div>`
+      : info.rows.map(fields).join('');
+    h+=`<section class="src"><h6>${esc(SOURCE_LABELS[table]||table)}${n>1?` &middot; ${n}`:''}</h6>`
+      +inner
+      +(info.truncated?`<p class="more">+ more rows (showing first ${n})</p>`:'')
+      +`</section>`;
+  }
+  document.getElementById('modalBody').innerHTML=h;
+  document.getElementById('modal').showModal();
+  if(m.related.despachos)buildDispatchTimeline(m.related.despachos.rows);
+  const dep=(m.related.depositantes||{rows:[]}).rows[0];
+  if(dep&&String(dep.cnpj_cpf_titular||'').replace(/\D/g,'').length===14)fetchCompany(dep.cnpj_cpf_titular);
+}
+function buildDispatchTimeline(rows){
+  const el=document.getElementById('dispatchTimeline');
+  if(!el)return;
+  const items=rows.filter(r=>r.data_rpi).map((r,i)=>({
+    id:i, start:r.data_rpi, className:despachoClass(r.descricao_despacho),
+    content:esc(String(r.codigo_despacho||'').trim()||('#'+(i+1))),
+    title:`${esc(r.data_rpi)} &middot; ${esc(r.descricao_despacho||'')}`
+  })).sort((a,b)=>a.start<b.start?-1:1);
+  if(!window.vis||!items.length){
+    el.innerHTML=rows.map(r=>`<div class="rel"><b>${esc(r.data_rpi||'?')}</b> ${esc(r.descricao_despacho||r.codigo_despacho||'')}</div>`).join('');
+    return;
+  }
+  new vis.Timeline(el, new vis.DataSet(items), {
+    stack:true, height:'210px', margin:{item:10}, zoomMin:1000*60*60*24*30,
+    tooltip:{followMouse:true, overflowMethod:'flip'}
+  });
+}
+async function fetchCompany(cnpj){
+  const el=document.getElementById('ownerCompany');
+  if(!el)return;
+  el.textContent='checking company...';
+  try{
+    const c=await (await fetch('/api/cnpj?cnpj='+encodeURIComponent(cnpj))).json();
+    if(c.error){el.textContent='';return;}
+    const lvl=c.situacao==='ATIVA'?'good':(c.situacao?'bad':'warn');
+    el.innerHTML=badge(c.situacao||'?',lvl)+(c.atividade?` <small>${esc(c.atividade)}</small>`:'');
+  }catch(e){el.textContent='';}
+}
+async function openDomainModal(domain){
+  document.getElementById('modalTitle').innerHTML=`<strong>${esc(domain)}</strong>`;
+  document.getElementById('modalBody').innerHTML='<p aria-busy="true">Loading registration & site data...</p>';
+  document.getElementById('modal').showModal();
+  const x=await (await fetch('/api/domain?domain='+encodeURIComponent(domain))).json();
+  let titleBadge,body;
+  if(x.available===true){
+    titleBadge=badge('AVAILABLE','good');
+    body=`<p>${badge('AVAILABLE','good')} No registration record found &mdash; this domain appears available to register.</p>`;
+  }else if(x.available===false){
+    const exp=daysUntil(x.expires)!==null&&daysUntil(x.expires)<180;
+    titleBadge=exp?badge('EXPIRING','warn'):badge('TAKEN','bad');
+    body=`<div class="msub">${exp?badge('EXPIRING','warn'):badge('REGISTERED','bad')}</div><dl class="facts">`
+      +(x.registrar?`<dt>Registrar</dt><dd>${esc(x.registrar)}</dd>`:'')
+      +(x.registered?`<dt>Registered</dt><dd>${esc(fmtDate(x.registered))}</dd>`:'')
+      +(x.expires?`<dt>Expires</dt><dd>${esc(fmtDate(x.expires))}${expiryBadge(x.expires)}</dd>`:'')
+      +(x.updated?`<dt>Updated</dt><dd>${esc(fmtDate(x.updated))}</dd>`:'')
+      +(x.status&&x.status.length?`<dt>Status</dt><dd>${esc(x.status.join(', '))}</dd>`:'')
+      +(x.nameservers&&x.nameservers.length?`<dt>Nameservers</dt><dd>${x.nameservers.map(esc).join('<br>')}</dd>`:'')
+      +`</dl><div id="siteSection"><p class="more" aria-busy="true">checking website...</p></div>`;
+  }else{
+    titleBadge=badge('UNKNOWN','warn');
+    body=`<p>${badge('UNKNOWN','warn')} ${esc(x.error||'No authoritative RDAP answer for this TLD.')}</p>`;
+  }
+  document.getElementById('modalTitle').innerHTML=`${titleBadge} <strong>${esc(domain)}</strong>`;
+  document.getElementById('modalBody').innerHTML=body;
+  if(x.available===false)loadSite(domain);
+}
+async function loadSite(domain){
+  const sec=document.getElementById('siteSection');
+  if(!sec)return;
+  let s=SITE[domain];
+  if(!s){try{s=await (await fetch('/api/site?domain='+encodeURIComponent(domain))).json();SITE[domain]=s;}catch(e){sec.innerHTML='';return;}}
+  if(document.getElementById('siteSection'))document.getElementById('siteSection').outerHTML=siteHtml(s);
+  // mShots returns a placeholder while it renders; refresh the image once it's ready
+  if(s.ok&&s.screenshot){
+    const img=document.querySelector('#siteSection img.shot');
+    if(img)setTimeout(()=>{ if(document.body.contains(img))img.src=s.screenshot+'&r=1'; },4000);
+  }
+}
+function siteHtml(s){
+  const dot=s.ok?badge('LIVE SITE','good'):badge('NO WEBSITE','bad');
+  let h=`<section class="src" id="siteSection"><h6>Website</h6><p>${dot} `;
+  h+=s.ok?`<b><a href="${esc(s.finalUrl)}" target="_blank" rel="noopener">${esc(s.finalUrl)}</a></b> &middot; HTTP ${esc(s.status)}${s.title?` &middot; &ldquo;${esc(s.title)}&rdquo;`:''}</p>`
+        :`registered, but no HTTP 200 website responded (parked / no site).</p>`;
+  if(s.ok&&s.screenshot)h+=`<img class="shot" loading="lazy" src="${esc(s.screenshot)}" alt="snapshot of ${esc(s.domain)}">`;
+  if(s.curl)h+=`<details><summary>raw curl &mdash; follows all redirects</summary><pre class="curl">${esc(s.curl)}</pre></details>`;
+  return h+`</section>`;
+}
+document.getElementById('modalClose').addEventListener('click',()=>document.getElementById('modal').close());
+document.getElementById('modal').addEventListener('click',ev=>{ if(ev.target.id==='modal')ev.target.close(); });
+document.addEventListener('DOMContentLoaded',()=>{showSearch();openJobs();});
+</script></body></html>

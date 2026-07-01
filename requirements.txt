@@ -1,3 +1,4 @@
 psycopg[binary,pool]
 celery
 redis
+jinja2
