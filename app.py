@@ -474,8 +474,8 @@ def start_build(all_files: bool) -> None:
 # --------------------------------------------------------------------------- #
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 FUZZY_SIM = float(
-    os.environ.get("FUZZY_SIM", "0.3")
-)  # pg_trgm similarity floor for look-alikes
+    os.environ.get("FUZZY_SIM", "0.5")
+)  # pg_trgm similarity floor (~matches the old rapidfuzz-82 result counts)
 ENRICH_TABLES = (
     "nice",
     "nacionais",
@@ -676,7 +676,10 @@ def check(
         f"FROM {_q(MAIN_TABLE)} WHERE {where}"
     )
     with _pool().connection() as db:
-        db.execute("SET pg_trgm.similarity_threshold = %s", (FUZZY_SIM,))
+        db.execute(
+            "SELECT set_config('pg_trgm.similarity_threshold', %s, false)",
+            (str(FUZZY_SIM),),
+        )
         rows = db.execute(sql, params).fetchall()
         cids = [r[JOIN_COL] for r in rows]
         related_by_cid: dict = {}

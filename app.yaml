@@ -2,10 +2,10 @@ name: gotchaped
 region: nyc
 services:
   - name: web
-    image:
-      registry_type: DOCR
-      repository: gotchaped
-      tag: latest
+    git:
+      repo_clone_url: https://github.com/iklobato/brand-check.git
+      branch: master
+    dockerfile_path: Dockerfile
     http_port: 8080
     instance_size_slug: professional-xs
     instance_count: 1
