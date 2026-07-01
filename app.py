@@ -11,9 +11,11 @@ Fuzzy look-alike matching needs `rapidfuzz` (pip install rapidfuzz); without it
 search degrades to exact + substring. This is a first-pass screen, not legal clearance.
 """
 
+import base64
 import csv
 import functools
 import glob
+import hashlib
 import http.client
 import json
 import math
@@ -1207,17 +1209,26 @@ def _domain_info(name: str, tld: str) -> dict:
     return info
 
 
+DOMAIN_WORKERS = 32
+
+
 def search_json(name: str) -> dict:
-    """One brand name -> domains across TLDs + INPI marks across all sources/classes."""
+    """One brand name -> INPI marks. Domains stream separately via /api/domains (real time)."""
     target = normalize(name)
-    # TLD checks are independent network calls; run concurrently but cap workers so
-    # the shared rdap.org bootstrap isn't hammered (it rate-limits) with many TLDs.
-    with ThreadPoolExecutor(max_workers=min(32, len(TLDS))) as pool:
-        domains = list(pool.map(functools.partial(_domain_info, name), TLDS))
-    # check() returns score-sorted; stable re-sort by availability keeps best score within a group.
     marks = [_hit_json(hit, target) for hit in check(name, None, fuzzy=True)]
     marks.sort(key=lambda m: AVAILABILITY_RANK[m["availability"]])
-    return {"name": name, "domains": domains, "marks": marks}
+    return {"name": name, "marks": marks}
+
+
+def domains_stream(name: str):
+    """Yield each TLD's verdict the instant its worker finishes: a 32-consumer
+    ThreadPoolExecutor drained with as_completed, so results arrive in real time."""
+    from concurrent.futures import as_completed
+
+    with ThreadPoolExecutor(max_workers=min(DOMAIN_WORKERS, len(TLDS))) as pool:
+        futures = [pool.submit(_domain_info, name, tld) for tld in TLDS]
+        for future in as_completed(futures):
+            yield future.result()
 
 
 def build_status() -> dict:
@@ -1400,11 +1411,38 @@ async function runSearch(name){
   OUT_MARKS=d.marks;
   out.innerHTML=render(d);
   saveHistory(d);renderHistory();
-  // background: per registered domain, check for a live HTTP 200 site -> green/red dot
-  const registered=d.domains.filter(x=>x.verdict==='taken'||x.verdict==='expiring').map(x=>x.domain);
-  runSiteChecks(registered);
-  loadSocial(d.name);   // background maigret-style handle availability
+  streamDomains(d.name);   // domains fill in real time (32-worker pool, streamed)
+  loadSocial(d.name);      // background maigret-style handle availability
 }
+// open a WebSocket to /ws/domains and call onRow(row) for each verdict as it streams in
+function readDomainStream(name,onRow){
+  return new Promise(resolve=>{
+    const proto=location.protocol==='https:'?'wss:':'ws:';
+    let ws;
+    try{ ws=new WebSocket(proto+'//'+location.host+'/ws/domains?name='+encodeURIComponent(name)); }
+    catch(e){ resolve(); return; }
+    ws.onmessage=ev=>{ try{onRow(JSON.parse(ev.data));}catch(e){} };
+    ws.onclose=()=>resolve();
+    ws.onerror=()=>{ try{ws.close();}catch(e){} resolve(); };
+  });
+}
+async function streamDomains(name){
+  const grid=document.getElementById('domcards'), sum=document.getElementById('domsum');
+  if(!grid)return;
+  const items=[];
+  await readDomainStream(name,x=>{
+    items.push(x);
+    items.sort((a,b)=>DOM_RANK[a.verdict]-DOM_RANK[b.verdict]);
+    grid.innerHTML=items.map(domCard).join('');           // re-render sorted as each arrives
+    if(sum)sum.innerHTML=domSummaryHtml(domCounts(items));
+  });
+  // once all in: live-site dots for registered domains + fill the history entry's domain counts
+  runSiteChecks(items.filter(x=>x.verdict==='taken'||x.verdict==='expiring').map(x=>x.domain));
+  const h=loadHistory(); if(h[0]&&h[0].name===name){h[0].dom=domCounts(items);
+    try{localStorage.setItem('bah_history',JSON.stringify(h));}catch(e){} renderHistory();}
+}
+// collect the full domain list (used by compare, which is not real-time)
+async function fetchDomains(name){const items=[];await readDomainStream(name,x=>items.push(x));return items;}
 async function loadSocial(name){
   const el=document.getElementById('social');
   if(!el)return;
@@ -1469,23 +1507,28 @@ const AVAIL_LABEL={taken:'TAKEN',pending:'PENDING',free:'FREE'};
 let MARKS=[];
 const DOM_CLASS={available:'free',expiring:'pending',taken:'taken',unknown:'pending'};
 const DOM_RANK={available:0,expiring:1,unknown:2,taken:3};
-function summarize(d){
+function domCounts(list){
   const dom={available:0,expiring:0,taken:0,unknown:0};
-  for(const x of d.domains)dom[x.verdict]=(dom[x.verdict]||0)+1;
+  for(const x of list||[])dom[x.verdict]=(dom[x.verdict]||0)+1;
+  return dom;
+}
+function summarize(d){
   const mark={free:0,pending:0,taken:0};
   for(const m of d.marks)mark[m.availability]=(mark[m.availability]||0)+1;
-  return {name:d.name,t:Date.now(),dom,mark};
+  return {name:d.name,t:Date.now(),dom:domCounts(d.domains),mark};
+}
+function domSummaryHtml(dom){
+  return `${badge(dom.available+' available','good')} `
+    +`${dom.expiring?badge(dom.expiring+' expiring','warn')+' ':''}${badge(dom.taken+' taken','bad')} `
+    +`${dom.unknown?badge(dom.unknown+' unknown','warn'):''}`;
 }
 function render(d){
   const s=summarize(d);
   let h=`<h3>${esc(d.name)}</h3>`;
-  // Domains: same one-line cards, colors, available-first sort, and click-to-modal as INPI
-  h+=`<h4>Domains <small>(${d.domains.length} TLDs)</small></h4>`;
-  h+=`<p>${badge(s.dom.available+' available','good')} `
-    +`${s.dom.expiring?badge(s.dom.expiring+' expiring','warn')+' ':''}${badge(s.dom.taken+' taken','bad')} `
-    +`${s.dom.unknown?badge(s.dom.unknown+' unknown','warn'):''}</p>`;
-  const doms=[...d.domains].sort((a,b)=>DOM_RANK[a.verdict]-DOM_RANK[b.verdict]);
-  h+=`<div class="cards">`+doms.map(domCard).join('')+'</div>';
+  // Domains: streamed in real time (each TLD card appears as its worker finishes)
+  h+=`<h4>Domains</h4>`;
+  h+=`<p id="domsum"><span aria-busy="true">checking domains...</span></p>`;
+  h+=`<div id="domcards" class="cards"></div>`;
   // Social handles (filled in the background, maigret-style)
   h+='<h4>Social handles <small>(maigret-style, best-effort)</small></h4>'
     +'<div id="social"><span class="muted">checking handles &hellip;</span></div>';
@@ -1562,9 +1605,13 @@ function renderCompare(results){
 async function openCompare(names){
   const out=document.getElementById('out');
   out.innerHTML='<article aria-busy="true">Comparing '+names.length+' names...</article>';
-  CMP=await Promise.all(names.map(n=>
-    fetch('/api/search?name='+encodeURIComponent(n)).then(r=>r.json())
-      .catch(()=>({name:n,domains:[],marks:[]}))));
+  CMP=await Promise.all(names.map(async n=>{
+    const [s,domains]=await Promise.all([
+      fetch('/api/search?name='+encodeURIComponent(n)).then(r=>r.json()).catch(()=>({marks:[]})),
+      fetchDomains(n).catch(()=>[])
+    ]);
+    return {name:n, marks:s.marks||[], domains};
+  }));
   out.innerHTML=renderCompare(CMP);
   window.scrollTo(0,0);
 }
@@ -1723,7 +1770,25 @@ document.addEventListener('DOMContentLoaded',tick);
 # --------------------------------------------------------------------------- #
 # server
 # --------------------------------------------------------------------------- #
+_WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def _ws_text_frame(text: str) -> bytes:
+    """RFC 6455 server->client text frame (FIN+text, unmasked)."""
+    data = text.encode("utf-8")
+    n = len(data)
+    if n < 126:
+        header = bytes([0x81, n])
+    elif n < 65536:
+        header = bytes([0x81, 126]) + n.to_bytes(2, "big")
+    else:
+        header = bytes([0x81, 127]) + n.to_bytes(8, "big")
+    return header + data
+
+
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # keep-alive + WebSocket upgrade
+
     def _send(
         self, body: str, content_type: str = "text/html", status: int = 200
     ) -> None:
@@ -1741,18 +1806,44 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         return self.rfile.read(length).decode("utf-8") if length else ""
 
+    def _ws_domains(self, name: str) -> None:
+        """Upgrade to WebSocket and push each domain verdict as its worker finishes."""
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        accept = base64.b64encode(
+            hashlib.sha1((key + _WS_MAGIC).encode()).digest()
+        ).decode()
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+        try:
+            for row in domains_stream(name) if name else iter(()):
+                self.wfile.write(_ws_text_frame(json.dumps(row)))
+                self.wfile.flush()
+            self.wfile.write(b"\x88\x00")  # close frame
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        self.close_connection = True
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
+        if (
+            path == "/ws/domains"
+            and "websocket" in self.headers.get("Upgrade", "").lower()
+        ):
+            self._ws_domains(query.get("name", [""])[0].strip())
+            return
         if path in ("/", ""):
             self._send(PAGE)
         elif path == "/api/status":
             self._send_json(build_status())
         elif path == "/api/search":
-            name = urllib.parse.parse_qs(parsed.query).get("name", [""])[0].strip()
-            self._send_json(
-                search_json(name) if name else {"name": "", "domains": [], "marks": []}
-            )
+            name = query.get("name", [""])[0].strip()
+            self._send_json(search_json(name) if name else {"name": "", "marks": []})
         elif path == "/api/domain":
             domain = urllib.parse.parse_qs(parsed.query).get("domain", [""])[0].strip()
             self._send_json(domain_detail(domain) if domain else {"error": "no domain"})
